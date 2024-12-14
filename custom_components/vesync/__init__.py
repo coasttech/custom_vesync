@@ -1,4 +1,4 @@
-    """VeSync integration."""
+"""VeSync integration."""
 
 from datetime import timedelta
 import logging
