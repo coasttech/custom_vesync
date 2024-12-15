@@ -59,7 +59,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         _LOGGER.error("Unable to login to the VeSync server")
         return False
 
-    forward_setup = hass.config_entries.async_forward_entry_setup
+    forward_setup = hass.config_entries.async_forward_entry_setups
 
     hass.data[DOMAIN] = {config_entry.entry_id: {}}
     hass.data[DOMAIN][config_entry.entry_id][VS_MANAGER] = manager
@@ -92,29 +92,31 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         hass.data[DOMAIN][config_entry.entry_id][vs_p] = []
         if device_dict[vs_p]:
             hass.data[DOMAIN][config_entry.entry_id][vs_p].extend(device_dict[vs_p])
-            hass.async_create_task(forward_setup(config_entry, p))
+            await hass.config_entries.async_forward_entry_setups(config_entry, [p])
 
     async def async_new_device_discovery(service: ServiceCall) -> None:
         """Discover if new devices should be added."""
         manager = hass.data[DOMAIN][config_entry.entry_id][VS_MANAGER]
         dev_dict = await async_process_devices(hass, manager)
 
-        def _add_new_devices(platform: str) -> None:
+        async def _add_new_devices(platform: str) -> None:
             """Add new devices to hass."""
-            old_devices = hass.data[DOMAIN][config_entry.entry_id][PLATFORMS[platform]]
-            if new_devices := list(
-                set(dev_dict.get(VS_SWITCHES, [])).difference(old_devices)
-            ):
+            old_devices = hass.data[DOMAIN][config_entry.entry_id].get(PLATFORMS[platform], [])
+            new_devices = list(
+                set(dev_dict.get(PLATFORMS[platform], [])).difference(old_devices)
+            )
+
+            if new_devices:
                 old_devices.extend(new_devices)
-                if old_devices:
+                if old_devices:  # If existing devices, signal discovery
                     async_dispatcher_send(
                         hass, VS_DISCOVERY.format(PLATFORMS[platform]), new_devices
                     )
-                else:
-                    hass.async_create_task(forward_setup(config_entry, platform))
+                else:  # If no old devices, forward platform setup
+                    await hass.config_entries.async_forward_entry_setups(config_entry, [platform])
 
-        for k in PLATFORMS:
-            _add_new_devices(k)
+        for platform in PLATFORMS:
+            await _add_new_devices(platform)
 
     hass.services.async_register(
         DOMAIN, SERVICE_UPDATE_DEVS, async_new_device_discovery
@@ -125,10 +127,15 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(
-        entry, list(PLATFORMS.keys())
-    )
+    # Unload only the platforms that were actually set up
+    loaded_platforms = [
+        platform for platform, devices in hass.data[DOMAIN][entry.entry_id].items()
+        if devices  # Ensure we only process platforms with devices
+    ]
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, loaded_platforms)
+
+    # Remove the integration data from hass.data if unload was successful
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        hass.data[DOMAIN].pop(entry.entry_id, None)
 
     return unload_ok
